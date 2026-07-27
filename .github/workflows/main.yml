@@ -18,10 +18,6 @@ jobs:
           - goos: linux
             goarch: arm64
             cgo: "0"
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-            cgo: "0"
           # ── CGO_ENABLED=1：动态链接 glibc，走 getaddrinfo/NSS ──
           # 适用于直接部署在宿主机且使用透明代理 / fake-ip /
           # systemd-resolved 等场景：纯 Go resolver 直连
@@ -36,12 +32,6 @@ jobs:
             cgo: "1"
             cc: "aarch64-linux-gnu-gcc"
             cross_pkg: "gcc-aarch64-linux-gnu"
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-            cgo: "1"
-            cc: "arm-linux-gnueabihf-gcc"
-            cross_pkg: "gcc-arm-linux-gnueabihf"
 
     steps:
       - uses: actions/checkout@v4
