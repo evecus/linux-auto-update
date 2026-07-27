@@ -34,6 +34,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/check/", s.handleCheck)
 	s.mux.HandleFunc("/api/update/", s.handleUpdate)
 	s.mux.HandleFunc("/api/logs/", s.handleLogs)
+	s.mux.HandleFunc("/api/settings", s.handleSettings)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -217,6 +218,36 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"log": string(data)})
+}
+
+// GET /api/settings  -> return global settings
+// PUT /api/settings  -> update global settings (partial)
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, s.store.GetSettings())
+
+	case http.MethodPut:
+		var req struct {
+			GithubProxyEnabled *bool `json:"github_proxy_enabled"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.store.UpdateSettings(func(st *Settings) {
+			if req.GithubProxyEnabled != nil {
+				st.GithubProxyEnabled = *req.GithubProxyEnabled
+			}
+		}); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, s.store.GetSettings())
+
+	default:
+		w.WriteHeader(405)
+	}
 }
 
 // GET / -> serve embedded HTML panel

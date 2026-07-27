@@ -74,6 +74,13 @@
   textarea{resize:vertical;min-height:56px}
   .hint{font-size:.72rem;color:var(--text2);margin-top:3px}
   .divider{border:none;border-top:1px solid var(--border);margin:14px 0}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .toggle-row .toggle-label{font-size:.85rem;font-weight:500;color:var(--text)}
+  .toggle-wrap{flex-shrink:0;cursor:pointer}
+  .toggle{width:38px;height:22px;border-radius:11px;background:#cbd5e1;position:relative;transition:background .15s}
+  .toggle.on{background:var(--accent)}
+  .toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .15s}
+  .toggle.on .toggle-knob{transform:translateX(16px)}
   .confirm-modal{background:var(--card);border:1px solid var(--border);border-radius:14px;width:100%;max-width:380px;box-shadow:var(--shadow-lg);padding:26px 22px}
   .confirm-icon{font-size:2.2rem;margin-bottom:10px;display:block;text-align:center}
   .confirm-title{font-size:1rem;font-weight:600;color:var(--text);text-align:center;margin-bottom:8px}
@@ -133,6 +140,15 @@
       <div class="form-group">
         <label>GitHub 项目地址 <span class="req">*</span></label>
         <input id="fRepo" placeholder="https://github.com/owner/repo">
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <span class="toggle-label">GitHub 加速下载（使用代理站点）</span>
+          <div class="toggle-wrap" onclick="toggleGithubProxy()">
+            <div class="toggle" id="fGithubProxyToggle"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+        <div class="hint">开启后，下载 GitHub 相关文件时会自动探测并使用最快的代理站点，失败则依次尝试下一个；关闭则始终直连（默认关闭）。此设置为全局设置，对所有任务生效。</div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -246,7 +262,7 @@
   window.confirmCancel=function(){g('confirmModalBg').classList.add('hidden');if(_confirmResolve){_confirmResolve(false);_confirmResolve=null;}};
 
   // ---- State ----
-  var tasks=[],editID=null,logTaskID=null;
+  var tasks=[],editID=null,logTaskID=null,githubProxyEnabled=false;
 
   // ---- API ----
   function api(method,path,body){
@@ -385,12 +401,35 @@
     });
   };
 
+  // ---- Global settings (GitHub proxy) ----
+  function renderGithubProxyToggle(){
+    var el=g('fGithubProxyToggle');
+    if(!el) return;
+    el.className='toggle'+(githubProxyEnabled?' on':'');
+  }
+  function loadSettings(){
+    return api('GET','/api/settings').then(function(data){
+      githubProxyEnabled=!!data.github_proxy_enabled;
+      renderGithubProxyToggle();
+    }).catch(function(){});
+  }
+  window.toggleGithubProxy=function(){
+    githubProxyEnabled=!githubProxyEnabled;
+    renderGithubProxyToggle();
+    api('PUT','/api/settings',{github_proxy_enabled:githubProxyEnabled}).catch(function(e){
+      toast(e.message,'error');
+      githubProxyEnabled=!githubProxyEnabled;
+      renderGithubProxyToggle();
+    });
+  };
+
   // ---- Modal ----
   window.openModal=function(){
     editID=null;g('modalTitle').textContent='添加任务';
     ['fName','fRepo','fVersion','fKeyword','fRename','fTarget','fPre','fPost','fCron','fBinaryKeyword'].forEach(function(id){g(id).value='';});
     g('fType').value='core';g('modalBg').classList.remove('hidden');
     updateTypeVisibility();
+    loadSettings();
   };
   window._editTask=function(id){
     var t=null;for(var i=0;i<tasks.length;i++){if(tasks[i].id===id){t=tasks[i];break;}}if(!t)return;
@@ -401,6 +440,7 @@
     g('fBinaryKeyword').value=t.binary_keyword||'';
     g('modalBg').classList.remove('hidden');
     updateTypeVisibility();
+    loadSettings();
   };
   window.closeModal=function(){g('modalBg').classList.add('hidden');};
 

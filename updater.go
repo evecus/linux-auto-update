@@ -103,7 +103,8 @@ func RunUpdate(task *Task, store *Store) {
 	setStatus("updating", "")
 
 	// Download
-	tmpFile, err := DownloadFile(result.Asset.BrowserDownloadURL, logger)
+	proxyEnabled := store.GetSettings().GithubProxyEnabled
+	tmpFile, err := DownloadFile(result.Asset.BrowserDownloadURL, proxyEnabled, logger)
 	if err != nil {
 		logger(fmt.Sprintf("❌ download failed: %v", err))
 		setStatus("error", err.Error())

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,20 +19,129 @@ import (
 	"archive/zip"
 )
 
-var ghProxies = []string{
-	"",                      // direct first
+// githubProxyPrefixes 是 GitHub 加速下载开启时可选用的代理前缀列表。
+// 实际下载前会对这些前缀做一次轻量探测，优先使用响应最快的一个，
+// 失败则依次尝试下一个，直到全部失败才报错。
+var githubProxyPrefixes = []string{
 	"https://ghfast.top/",
 	"https://gh-proxy.com/",
 	"https://gh.ddlc.top/",
 	"https://ghproxy.it/",
+	"https://ghproxy.net/",
+	"https://gh.con.sh/",
+	"https://gh-proxy.net/",
+	"https://cdn.gh-proxy.com/",
+}
+
+// githubHosts 是被视为 "GitHub 相关" 从而可走加速代理的域名。
+var githubHosts = []string{
+	"github.com",
+	"raw.githubusercontent.com",
+	"objects.githubusercontent.com",
+	"codeload.github.com",
+	"releases.githubusercontent.com",
+	"release-assets.githubusercontent.com",
+	"gist.githubusercontent.com",
+	"gist.github.com",
+}
+
+// isGithubURL 判断是否是常见的 GitHub 链接。
+func isGithubURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, gh := range githubHosts {
+		if host == gh || strings.HasSuffix(host, "."+gh) {
+			return true
+		}
+	}
+	return false
+}
+
+// rankGithubProxies 并发探测所有代理前缀的可用性和延迟，
+// 返回按延迟从低到高排序的可用前缀列表；如果全部不可用，返回空切片。
+func rankGithubProxies(ctx context.Context, sampleURL string) []string {
+	type result struct {
+		prefix  string
+		latency time.Duration
+		ok      bool
+	}
+
+	probeClient := &http.Client{Timeout: 4 * time.Second}
+	resCh := make(chan result, len(githubProxyPrefixes))
+
+	for _, prefix := range githubProxyPrefixes {
+		go func(prefix string) {
+			probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			start := time.Now()
+
+			target := prefix + sampleURL
+			req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, target, nil)
+			if err != nil {
+				resCh <- result{prefix: prefix, ok: false}
+				return
+			}
+			resp, err := probeClient.Do(req)
+			if err != nil {
+				// 部分代理不支持 HEAD，退化为小范围 GET 探测
+				req2, err2 := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
+				if err2 != nil {
+					resCh <- result{prefix: prefix, ok: false}
+					return
+				}
+				req2.Header.Set("Range", "bytes=0-0")
+				resp2, err2 := probeClient.Do(req2)
+				if err2 != nil {
+					resCh <- result{prefix: prefix, ok: false}
+					return
+				}
+				defer resp2.Body.Close()
+				io.Copy(io.Discard, io.LimitReader(resp2.Body, 1))
+				ok := resp2.StatusCode < 400
+				resCh <- result{prefix: prefix, latency: time.Since(start), ok: ok}
+				return
+			}
+			defer resp.Body.Close()
+			ok := resp.StatusCode < 400
+			resCh <- result{prefix: prefix, latency: time.Since(start), ok: ok}
+		}(prefix)
+	}
+
+	results := make([]result, 0, len(githubProxyPrefixes))
+	for i := 0; i < len(githubProxyPrefixes); i++ {
+		r := <-resCh
+		if r.ok {
+			results = append(results, r)
+		}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].latency < results[j].latency
+	})
+
+	ranked := make([]string, 0, len(results))
+	for _, r := range results {
+		ranked = append(ranked, r.prefix)
+	}
+	return ranked
 }
 
 var dlClient = &http.Client{Timeout: 120 * time.Second}
 
-// DownloadFile tries direct download then proxy mirrors.
-// Returns the local temp file path. The temp file preserves the original
-// filename's extension so that format-detection by suffix works correctly.
-func DownloadFile(rawURL string, logger func(string)) (string, error) {
+// DownloadFile downloads rawURL to a local temp file and returns its path.
+//
+// proxyEnabled controls GitHub acceleration:
+//   - false (default): always download directly, proxies are never used.
+//   - true: if rawURL is a GitHub-related link, probe all proxy mirrors,
+//     rank them by latency, and try them in order (fastest first) until
+//     one succeeds or all fail. Direct connection is NOT attempted in this
+//     case — this mirrors the CloudOne panel's behavior.
+//
+// The temp file preserves the original filename's extension so that
+// format-detection by suffix works correctly.
+func DownloadFile(rawURL string, proxyEnabled bool, logger func(string)) (string, error) {
 	// Extract the original filename from the URL to keep its extension.
 	origName := filepath.Base(strings.Split(rawURL, "?")[0])
 	ext := ""
@@ -54,22 +165,41 @@ func DownloadFile(rawURL string, logger func(string)) (string, error) {
 	}
 	tmp.Close()
 
-	for _, proxy := range ghProxies {
-		url := proxy + rawURL
-		if proxy == "" {
-			logger(fmt.Sprintf("⬇ downloading (direct): %s", rawURL))
-		} else {
-			logger(fmt.Sprintf("⬇ retrying via proxy %s", proxy))
+	// Build the ordered list of URLs to attempt.
+	urlsToTry := []string{rawURL}
+	if proxyEnabled && isGithubURL(rawURL) {
+		logger("🔎 probing GitHub proxy mirrors...")
+		ranked := rankGithubProxies(context.Background(), rawURL)
+		if len(ranked) == 0 {
+			os.Remove(tmp.Name())
+			return "", fmt.Errorf("no available github proxy, please try again later or disable acceleration")
 		}
-		err := downloadTo(url, tmp.Name())
+		urlsToTry = make([]string, 0, len(ranked))
+		for _, prefix := range ranked {
+			urlsToTry = append(urlsToTry, prefix+rawURL)
+		}
+	}
+
+	var lastErr error
+	for i, u := range urlsToTry {
+		if proxyEnabled && isGithubURL(rawURL) {
+			logger(fmt.Sprintf("⬇ downloading via proxy (%d/%d): %s", i+1, len(urlsToTry), u))
+		} else {
+			logger(fmt.Sprintf("⬇ downloading (direct): %s", u))
+		}
+		err := downloadTo(u, tmp.Name())
 		if err == nil {
 			logger("✓ download complete")
 			return tmp.Name(), nil
 		}
 		logger(fmt.Sprintf("✗ failed: %v", err))
+		lastErr = err
 	}
 	os.Remove(tmp.Name())
-	return "", fmt.Errorf("all download attempts failed for %s", rawURL)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unknown error")
+	}
+	return "", fmt.Errorf("all download attempts failed for %s: %w", rawURL, lastErr)
 }
 
 func downloadTo(url, dest string) error {

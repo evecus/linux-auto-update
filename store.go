@@ -38,11 +38,17 @@ type Task struct {
 	LastError      string     `json:"last_error"`
 }
 
+// Settings holds global panel-wide configuration (not tied to a single task).
+type Settings struct {
+	GithubProxyEnabled bool `json:"github_proxy_enabled"`
+}
+
 // Store holds all tasks in memory and persists them as JSON.
 type Store struct {
-	mu      sync.RWMutex
-	dataDir string
-	Tasks   map[string]*Task `json:"tasks"`
+	mu       sync.RWMutex
+	dataDir  string
+	Tasks    map[string]*Task `json:"tasks"`
+	Settings Settings         `json:"settings"`
 }
 
 func NewStore(dataDir string) *Store {
@@ -56,6 +62,12 @@ func (s *Store) dbPath() string {
 	return filepath.Join(s.dataDir, "tasks.json")
 }
 
+// storeFile is the on-disk shape: tasks + global settings.
+type storeFile struct {
+	Tasks    map[string]*Task `json:"tasks"`
+	Settings Settings         `json:"settings"`
+}
+
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -66,11 +78,30 @@ func (s *Store) Load() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &s.Tasks)
+
+	// New format: {"tasks": {...}, "settings": {...}}.
+	var sf storeFile
+	if err := json.Unmarshal(data, &sf); err == nil && sf.Tasks != nil {
+		s.Tasks = sf.Tasks
+		s.Settings = sf.Settings
+		return nil
+	}
+
+	// Legacy format: the file itself is the tasks map (no "tasks" wrapper key).
+	var legacy map[string]*Task
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if legacy == nil {
+		legacy = make(map[string]*Task)
+	}
+	s.Tasks = legacy
+	return nil
 }
 
 func (s *Store) save() error {
-	data, err := json.MarshalIndent(s.Tasks, "", "  ")
+	sf := storeFile{Tasks: s.Tasks, Settings: s.Settings}
+	data, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -84,6 +115,21 @@ func (s *Store) save() error {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.save()
+}
+
+// GetSettings returns a copy of the current global settings.
+func (s *Store) GetSettings() Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Settings
+}
+
+// UpdateSettings applies fn to the global settings and persists the result.
+func (s *Store) UpdateSettings(fn func(*Settings)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&s.Settings)
 	return s.save()
 }
 
