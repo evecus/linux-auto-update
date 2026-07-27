@@ -5,18 +5,43 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }} (cgo=${{ matrix.cgo }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
+          # ── CGO_ENABLED=0：纯 Go 静态编译 ──────────────────────
+          # 常规部署场景使用，无需额外系统依赖。
           - goos: linux
             goarch: amd64
+            cgo: "0"
           - goos: linux
             goarch: arm64
+            cgo: "0"
           - goos: linux
             goarch: arm
             goarm: "7"
+            cgo: "0"
+          # ── CGO_ENABLED=1：动态链接 glibc，走 getaddrinfo/NSS ──
+          # 适用于直接部署在宿主机且使用透明代理 / fake-ip /
+          # systemd-resolved 等场景：纯 Go resolver 直连
+          # /etc/resolv.conf 里的 nameserver 可能无法被代理正确接管，
+          # 而 cgo 版本和 wget/curl 等系统工具走相同的 DNS 解析路径。
+          - goos: linux
+            goarch: amd64
+            cgo: "1"
+            cc: ""
+          - goos: linux
+            goarch: arm64
+            cgo: "1"
+            cc: "aarch64-linux-gnu-gcc"
+            cross_pkg: "gcc-aarch64-linux-gnu"
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            cgo: "1"
+            cc: "arm-linux-gnueabihf-gcc"
+            cross_pkg: "gcc-arm-linux-gnueabihf"
 
     steps:
       - uses: actions/checkout@v4
@@ -25,16 +50,25 @@ jobs:
         with:
           go-version: '1.21'
 
+      - name: Install cross compiler
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cross_pkg }}
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ matrix.cgo }}
+          CC: ${{ matrix.cc }}
         run: |
           ARCH_TAG="${{ matrix.goarch }}"
           [ "${{ matrix.goarm }}" != "" ] && ARCH_TAG="armv${{ matrix.goarm }}"
-          OUTPUT="updater-${GOOS}-${ARCH_TAG}"
+          SUFFIX=""
+          [ "${{ matrix.cgo }}" = "1" ] && SUFFIX="-cgo"
+          OUTPUT="updater-${GOOS}-${ARCH_TAG}${SUFFIX}"
           go build -ldflags="-s -w" -trimpath -o "$OUTPUT" .
           echo "OUTPUT=$OUTPUT" >> $GITHUB_ENV
 
